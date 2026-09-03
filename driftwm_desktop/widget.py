@@ -1,15 +1,14 @@
 import sys
 import time
-import threading
 from pathlib import Path
 from typing import Callable, Optional, List
 
 from PyQt5.QtWidgets import (
-    QWidget, QPushButton, QVBoxLayout, QLabel, QMenu, QAction,
+    QWidget, QVBoxLayout, QLabel, QMenu, QAction,
     QInputDialog, QMessageBox, QGraphicsDropShadowEffect, QApplication
 )
-from PyQt5.QtGui import QIcon, QFontMetrics, QColor, QPalette, QCursor
-from PyQt5.QtCore import Qt, QSize, QPoint, QEvent
+from PyQt5.QtGui import QIcon, QFontMetrics, QColor, QPalette, QCursor, QPainter
+from PyQt5.QtCore import Qt, QSize, QPoint
 
 from .config import ICON_SIZE, APP_ID
 from .parser import parse_item_info, DesktopItemInfo
@@ -17,7 +16,7 @@ from .actions import (
     launch_item, open_with, show_properties,
     move_to_trash, delete_permanently, copy_to_clipboard
 )
-from .driftwm import move_window, get_desktop_windows_map
+from .driftwm import move_window, move_window_async, get_desktop_windows_map
 from .i18n import tr
 
 class DesktopItemWidget(QWidget):
@@ -28,7 +27,7 @@ class DesktopItemWidget(QWidget):
     - OS theme palette awareness
     - Solid OS-themed context menu
     - Launch debounce
-    - Interactive real-time Drag & Drop positioning in DriftWM canvas
+    - Interactive real-time Drag & Drop positioning in DriftWM canvas via IPC
     - 'Open With...' choose application dialog
     - Dolphin-like file operations
     - Dynamic refresh on file change
@@ -54,12 +53,13 @@ class DesktopItemWidget(QWidget):
 
         self._last_launch_time = 0.0
 
-        # Drag and drop tracking
-        self._press_global_pos: Optional[QPoint] = None
-        self._drag_start_canvas_pos: Optional[List[int]] = None
+        # Drag tracking
+        self._press_pos: Optional[QPoint] = None
         self._is_dragging = False
+        self._drag_dist = 0
         self._current_canvas_pos: Optional[List[int]] = None
         self._last_drag_move_time = 0.0
+        self._is_hovered = False
 
         self.init_ui()
 
@@ -70,49 +70,35 @@ class DesktopItemWidget(QWidget):
         # Frameless window with transparent background
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        # Scope styling strictly to this widget so it does NOT cascade to child QMenu or popups
         self.setObjectName("DesktopItemWidget")
-        self.setStyleSheet("QWidget#DesktopItemWidget { background: transparent; }")
 
         # Layout
         self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(4, 4, 4, 4)
-        self.layout.setSpacing(3)
+        self.layout.setContentsMargins(6, 6, 6, 6)
+        self.layout.setSpacing(4)
 
-        # Button with icon
-        self.btn = QPushButton(self)
-        self.btn.setFixedSize(ICON_SIZE, ICON_SIZE)
-        self.btn.setToolTip(str(self.filepath))
-
+        # Icon display label
+        self.icon_label = QLabel(self)
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        self.icon_label.setFixedSize(ICON_SIZE, ICON_SIZE)
+        # Transparent for mouse events so parent widget receives all drag and click gestures
+        self.icon_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._update_icon()
-
-        # Theme-aware hover effect using system highlight color instead of hardcoded RGBA
-        pal = self.palette()
-        hl = pal.color(QPalette.Highlight)
-        hl_rgba = f"rgba({hl.red()}, {hl.green()}, {hl.blue()}, 0.25)"
-        self.btn.setStyleSheet(f"""
-            QPushButton {{
-                border: none;
-                background: transparent;
-                border-radius: 4px;
-            }}
-            QPushButton:hover {{
-                background-color: {hl_rgba};
-            }}
-        """)
-        self.btn.clicked.connect(self._on_button_clicked)
-        self.layout.addWidget(self.btn, alignment=Qt.AlignCenter)
+        self.layout.addWidget(self.icon_label, alignment=Qt.AlignCenter)
 
         # Text label under icon - displays full text without ellipses
         self.label = QLabel(self.item_info.display_name, self)
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setToolTip(self.item_info.display_name)
+        # Transparent for mouse events so clicking label also allows dragging
+        self.label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         # Use OS theme text color and subtle shadow for contrast on any wallpaper
+        pal = self.palette()
         text_color = pal.color(QPalette.WindowText).name()
         self.label.setStyleSheet(f"color: {text_color}; background: transparent; font-size: 11px;")
 
-        # Subtle shadow effect for legibility against both light and dark backgrounds
+        # Shadow effect for legibility against both light and dark backgrounds
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(4)
         shadow.setColor(QColor(0, 0, 0, 180))
@@ -124,19 +110,8 @@ class DesktopItemWidget(QWidget):
         # Resize the window to fit the full text without ellipses
         self.adjust_size_to_text()
 
-        # Install event filter to capture drag on icon, label, and widget background
-        self.installEventFilter(self)
-        self.btn.installEventFilter(self)
-        self.label.installEventFilter(self)
-
-        # Context menu policy
-        self.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.customContextMenuRequested.connect(self.show_context_menu)
-        self.btn.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.btn.customContextMenuRequested.connect(self.show_context_menu)
-
     def _update_icon(self):
-        """Loads and sets the button icon based on item info and MIME-type candidates."""
+        """Loads and sets the icon pixmap based on item info and MIME-type candidates."""
         icon = QIcon()
 
         # 1. Try explicit icon_name (e.g. from .desktop or primary MIME icon)
@@ -162,8 +137,8 @@ class DesktopItemWidget(QWidget):
             )
             icon = QIcon.fromTheme(fallback)
 
-        self.btn.setIcon(icon)
-        self.btn.setIconSize(QSize(int(ICON_SIZE * 0.8), int(ICON_SIZE * 0.8)))
+        pixmap = icon.pixmap(QSize(int(ICON_SIZE * 0.85), int(ICON_SIZE * 0.85)))
+        self.icon_label.setPixmap(pixmap)
 
     def refresh(self):
         """Reloads item metadata, updates icon/label, and recalculates size."""
@@ -171,7 +146,6 @@ class DesktopItemWidget(QWidget):
         self.setWindowTitle(self.filepath.name)
         self.label.setText(self.item_info.display_name)
         self.label.setToolTip(self.item_info.display_name)
-        self.btn.setToolTip(str(self.filepath))
         self._update_icon()
         self.adjust_size_to_text()
 
@@ -182,8 +156,8 @@ class DesktopItemWidget(QWidget):
         text_width = text_rect.width()
         text_height = max(fm.height(), text_rect.height())
 
-        window_width = max(ICON_SIZE + 16, text_width + 16)
-        window_height = ICON_SIZE + 4 + text_height + 12
+        window_width = max(ICON_SIZE + 20, text_width + 20)
+        window_height = ICON_SIZE + 4 + text_height + 16
 
         self.setFixedSize(window_width, window_height)
 
@@ -199,82 +173,113 @@ class DesktopItemWidget(QWidget):
             if pos and len(pos) >= 2:
                 self.canvas_pos = [int(round(pos[0])), int(round(pos[1]))]
 
-    def eventFilter(self, watched, event):
+    def paintEvent(self, event):
+        """Draws subtle OS highlight on hover."""
+        if self._is_hovered:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            pal = self.palette()
+            hl = pal.color(QPalette.Highlight)
+            highlight_color = QColor(hl.red(), hl.green(), hl.blue(), 55)
+            painter.setBrush(highlight_color)
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(self.rect().adjusted(2, 2, -2, -2), 6, 6)
+        super().paintEvent(event)
+
+    def enterEvent(self, event):
+        self._is_hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._is_hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        """Initiates drag tracking on left click."""
+        if event.button() == Qt.LeftButton:
+            self._press_pos = event.pos()
+            self._is_dragging = False
+            self._drag_dist = 0
+            self._ensure_driftwm_info()
+            if self.canvas_pos:
+                self._current_canvas_pos = list(self.canvas_pos)
+            else:
+                self._current_canvas_pos = [0, 0]
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
         """
-        Event filter to intercept and handle drag-and-drop across the icon,
-        the label, and the widget background.
+        Tracks physical mouse motion during drag and continuously repositions
+        the window via DriftWM IPC.
         """
-        if event.type() == QEvent.MouseButtonPress:
-            if event.button() == Qt.LeftButton:
-                self._press_global_pos = event.globalPos()
+        if (event.buttons() & Qt.LeftButton) and self._press_pos is not None:
+            dx = event.pos().x() - self._press_pos.x()
+            dy = event.pos().y() - self._press_pos.y()
+
+            if not self._is_dragging:
+                self._drag_dist += abs(dx) + abs(dy)
+                if self._drag_dist >= 6:
+                    self._is_dragging = True
+                    QApplication.setOverrideCursor(Qt.ClosedHandCursor)
+
+            if self._is_dragging:
+                if self._current_canvas_pos is None:
+                    self._ensure_driftwm_info()
+                    if self.canvas_pos:
+                        self._current_canvas_pos = list(self.canvas_pos)
+                    else:
+                        self._current_canvas_pos = [0, 0]
+
+                if dx != 0 or dy != 0:
+                    # In DriftWM canvas: X is right (+dx), Y is UP (-dy)
+                    self._current_canvas_pos[0] += dx
+                    self._current_canvas_pos[1] -= dy
+
+                    now = time.time()
+                    if now - self._last_drag_move_time >= 0.015:
+                        self._last_drag_move_time = now
+                        if self.driftwm_id is not None:
+                            move_window_async(
+                                self.driftwm_id,
+                                self._current_canvas_pos[0],
+                                self._current_canvas_pos[1]
+                            )
+                event.accept()
+                return
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Finalizes position via IPC and updates persistent state."""
+        if event.button() == Qt.LeftButton:
+            if self._is_dragging:
+                QApplication.restoreOverrideCursor()
                 self._is_dragging = False
-                self._ensure_driftwm_info()
-                if self.canvas_pos:
-                    self._drag_start_canvas_pos = list(self.canvas_pos)
-                else:
-                    self._drag_start_canvas_pos = None
+                if self._current_canvas_pos and self.driftwm_id is not None:
+                    move_window(self.driftwm_id, self._current_canvas_pos[0], self._current_canvas_pos[1])
+                    self.canvas_pos = list(self._current_canvas_pos)
+                    if self.on_moved:
+                        self.on_moved(self.filepath.name, self.canvas_pos)
+                self._press_pos = None
+                event.accept()
+                return
+            else:
+                self._press_pos = None
 
-        elif event.type() == QEvent.MouseMove:
-            if (event.buttons() & Qt.LeftButton) and self._press_global_pos is not None:
-                delta = event.globalPos() - self._press_global_pos
-                dist_sq = delta.x() * delta.x() + delta.y() * delta.y()
+        super().mouseReleaseEvent(event)
 
-                # Start dragging once threshold (5 pixels) is exceeded
-                if not self._is_dragging:
-                    if dist_sq >= 25:
-                        self._is_dragging = True
-                        QApplication.setOverrideCursor(Qt.ClosedHandCursor)
-
-                if self._is_dragging:
-                    if not self._drag_start_canvas_pos:
-                        self._ensure_driftwm_info()
-                        if self.canvas_pos:
-                            self._drag_start_canvas_pos = list(self.canvas_pos)
-
-                    if self._drag_start_canvas_pos:
-                        # In DriftWM canvas: X is right (+x), Y is UP (-dy)
-                        delta_x = delta.x()
-                        delta_y = -delta.y()
-                        new_x = self._drag_start_canvas_pos[0] + delta_x
-                        new_y = self._drag_start_canvas_pos[1] + delta_y
-                        self._current_canvas_pos = [new_x, new_y]
-
-                        # Throttle IPC calls to 60fps (every 16ms)
-                        now = time.time()
-                        if now - self._last_drag_move_time >= 0.016:
-                            self._last_drag_move_time = now
-                            if self.driftwm_id is not None:
-                                move_window(self.driftwm_id, new_x, new_y)
-
-                    # Consume event to suppress button clicks while dragging
-                    return True
-
-        elif event.type() == QEvent.MouseButtonRelease:
-            if event.button() == Qt.LeftButton:
-                if self._is_dragging:
-                    QApplication.restoreOverrideCursor()
-                    if self._current_canvas_pos and self.driftwm_id is not None:
-                        move_window(self.driftwm_id, self._current_canvas_pos[0], self._current_canvas_pos[1])
-                        self.canvas_pos = list(self._current_canvas_pos)
-                        if self.on_moved:
-                            self.on_moved(self.filepath.name, self.canvas_pos)
-
-                    self._is_dragging = False
-                    self._press_global_pos = None
-                    self._drag_start_canvas_pos = None
-                    # Suppress the button click since this was a drag
-                    return True
-
-                self._is_dragging = False
-                self._press_global_pos = None
-                self._drag_start_canvas_pos = None
-
-        return super().eventFilter(watched, event)
-
-    def _on_button_clicked(self):
-        """Called when icon button is clicked without dragging."""
-        if not self._is_dragging:
+    def mouseDoubleClickEvent(self, event):
+        """Double-clicking launches the item (with debounce)."""
+        if event.button() == Qt.LeftButton:
             self.launch()
+            event.accept()
+
+    def contextMenuEvent(self, event):
+        """Right-clicking displays the context menu."""
+        self.show_context_menu(event.globalPos())
+        event.accept()
 
     def launch(self):
         """Executes or opens the desktop item with a debounce to prevent double opens."""
@@ -283,12 +288,6 @@ class DesktopItemWidget(QWidget):
             return
         self._last_launch_time = now
         launch_item(self.filepath, self.item_info.cmd, debounce_sec=0.8)
-
-    def mouseDoubleClickEvent(self, event):
-        """Double click on the widget launches the item (debounced)."""
-        if event.button() == Qt.LeftButton:
-            self.launch()
-            event.accept()
 
     def action_rename(self):
         """Prompts user to rename the file, renames on disk and updates widget."""
@@ -341,7 +340,7 @@ class DesktopItemWidget(QWidget):
             else:
                 QMessageBox.critical(self, tr("error"), tr("delete_error", filename=filename))
 
-    def show_context_menu(self, pos):
+    def show_context_menu(self, global_pos):
         """
         Displays an opaque, OS-themed context menu with Dolphin-like options,
         including 'Open With...' (app chooser dialog).
@@ -421,6 +420,4 @@ class DesktopItemWidget(QWidget):
         close_icon = QIcon.fromTheme("window-close")
         menu.addAction(close_icon, tr("hide_widget"), self.close)
 
-        sender = self.sender()
-        global_pos = sender.mapToGlobal(pos) if sender else self.mapToGlobal(pos)
         menu.exec_(global_pos)

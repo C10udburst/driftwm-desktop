@@ -62,6 +62,14 @@ def move_window(window_id: int, x: float, y: float) -> bool:
     except Exception:
         return False
 
+def move_window_async(window_id: int, x: float, y: float):
+    """Reposition window in driftwm asynchronously without blocking the UI thread."""
+    cmd = ["driftwm", "msg", "move", "--id", str(window_id), str(int(round(x))), str(int(round(y)))]
+    try:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
 def subscribe_stream() -> Generator[dict, None, None]:
     """
     Spawns 'driftwm msg subscribe --json' and yields state updates.
