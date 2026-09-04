@@ -41,9 +41,8 @@ def main():
     parser.add_argument(
         "--lang",
         type=str,
-        choices=["en", "pl"],
         default=None,
-        help="Override language ('en' or 'pl', defaults to environment/system locale)"
+        help="Override language code (e.g. 'en', 'pl', defaults to environment/system locale)"
     )
 
     args = parser.parse_args()

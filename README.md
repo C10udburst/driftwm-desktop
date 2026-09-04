@@ -45,8 +45,10 @@ Each desktop icon is an independent, frameless, transparent widget living direct
 - **Persistent State & Boot Race Protection**:
   - Tracks live window coordinates into `~/.local/state/driftwm-desktop.json`.
   - Includes initialization guards that prevent initial window manager auto-placements from overwriting saved user coordinates.
-- **Bilingual i18n Localization**:
-  - Dynamic translation catalogs for English (`en`) and Polish (`pl`), auto-detected from system locale or overridden via `--lang`.
+- **Internationalization (i18n) — Translations & PRs Welcome!**:
+  - Fully dynamic JSON translation catalogs loaded from `driftwm_desktop/locales/`.
+  - Ships with English (`en`) and Polish (`pl`), auto-detected from the system locale or specified via `--lang`.
+  - Adding new languages requires no code changes — Pull Requests for additional languages are warmly welcome!
 
 ---
 
@@ -138,8 +140,23 @@ options:
   --reset-positions, --reset
                         Reset all desktop item positions to a clean default grid
                         and update saved state (safe to run while the app is active)
-  --lang {en,pl}        Override language ('en' or 'pl', defaults to system locale)
+  --lang LANG           Override language code (e.g. 'en', 'pl', defaults to system locale)
 ```
+
+---
+
+## Internationalization & Contributing Translations
+
+`driftwm-desktop` uses plain JSON translation catalogs in the `driftwm_desktop/locales/` directory (e.g. `en.json`, `pl.json`). All catalogs are loaded dynamically at runtime.
+
+Pull Requests adding or refining translations for any language are warmly welcome!
+
+### Adding a New Language
+
+1. Copy `driftwm_desktop/locales/en.json` to `driftwm_desktop/locales/<language_code>.json` (for instance, `de.json`, `fr.json`, `es.json`, `uk.json`).
+2. Translate the values in the JSON file.
+3. Test your translation with `driftwm-desktop --lang <language_code>`.
+4. Submit a Pull Request!
 
 ---
 
