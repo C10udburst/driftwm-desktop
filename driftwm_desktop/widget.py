@@ -16,7 +16,7 @@ from .actions import (
     launch_item, open_with, show_properties,
     move_to_trash, delete_permanently, copy_to_clipboard
 )
-from .driftwm import move_window, move_window_async, get_desktop_windows_map, get_zoom
+from .driftwm import move_window, move_window_async, get_desktop_windows_map
 from .i18n import tr
 
 class DesktopItemWidget(QWidget):
@@ -64,7 +64,6 @@ class DesktopItemWidget(QWidget):
         self._current_canvas_pos: Optional[List[int]] = None
         self._last_drag_move_time = 0.0
         self._is_hovered = False
-        self._zoom = 1.0
 
         self.init_ui()
 
@@ -209,7 +208,6 @@ class DesktopItemWidget(QWidget):
             self._last_drag_pos = event.pos()
             self._is_dragging = False
             self._drag_dist = 0
-            self._zoom = get_zoom()
 
             if not self.canvas_pos:
                 self._refresh_driftwm_info()
@@ -250,9 +248,10 @@ class DesktopItemWidget(QWidget):
                     else:
                         self._current_canvas_pos = [0, 0]
 
-                # Convert screen delta to canvas delta using active zoom factor
-                canvas_dx = int(round(step_dx / self._zoom)) if self._zoom else step_dx
-                canvas_dy = int(round(-step_dy / self._zoom)) if self._zoom else -step_dy  # DriftWM canvas Y is UP
+                # event.pos() in DriftWM canvas surfaces is already in canvas units;
+                # 1 surface pixel delta equals 1 canvas coordinate unit.
+                canvas_dx = step_dx
+                canvas_dy = -step_dy  # DriftWM canvas Y is UP
 
                 if canvas_dx != 0 or canvas_dy != 0:
                     self._current_canvas_pos[0] += canvas_dx
