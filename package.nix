@@ -55,7 +55,7 @@ stdenv.mkDerivation {
 
   meta = with lib; {
     description = "Modular, spatial desktop icons manager for DriftWM";
-    license = licenses.mit;
+    license = licenses.gpl3Only;
     platforms = platforms.linux;
     mainProgram = "driftwm-desktop";
   };

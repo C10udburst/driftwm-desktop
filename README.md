@@ -73,48 +73,96 @@ autostart = [
 
 ---
 
-## Installation & Running
+## Installation & Setup Guide
 
-### Using Nix / Flakes (Recommended)
+### 1. NixOS Installation (Flakes)
 
-Run directly with Nix Flakes:
-
-```bash
-nix run github:<your-username>/driftwm-desktop
-# or locally from source:
-nix run .
-```
-
-#### NixOS / Home-Manager Flake Integration
-
-Add `driftwm-desktop` to your `flake.nix` inputs:
+#### Step 1: Add Flake Input
+Add `driftwm-desktop` to your system's `flake.nix`:
 
 ```nix
 {
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     driftwm-desktop.url = "github:<your-username>/driftwm-desktop";
+    # Ensure driftwm-desktop shares your system's nixpkgs version:
+    driftwm-desktop.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs = { self, nixpkgs, driftwm-desktop, ... }: {
-    # In your home-manager or nixos configuration:
-    environment.systemPackages = [
-      driftwm-desktop.packages.${pkgs.system}.default
-    ];
+    nixosConfigurations.my-hostname = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        # Option A: Import the bundled NixOS module:
+        driftwm-desktop.nixosModules.default
+        {
+          services.driftwm-desktop.enable = true;
+        }
+
+        # Option B: Or add directly to environment.systemPackages:
+        # ({ pkgs, ... }: {
+        #   environment.systemPackages = [
+        #     driftwm-desktop.packages.${pkgs.system}.default
+        #   ];
+        # })
+      ];
+    };
   };
 }
 ```
 
-### Running with Python Directly
+#### Step 2 (Alternative): Home Manager Integration
+If you manage packages via Home Manager:
+
+```nix
+{ pkgs, ... }: {
+  home.packages = [
+    driftwm-desktop.packages.${pkgs.system}.default
+  ];
+}
+```
+
+#### Step 3 (Alternative): Using the Overlay
+You can also import the provided overlay:
+
+```nix
+{
+  nixpkgs.overlays = [
+    driftwm-desktop.overlays.default
+  ];
+  environment.systemPackages = [ pkgs.driftwm-desktop ];
+}
+```
+
+---
+
+### 2. Testing Without Installing
+
+Run instantly with `nix run`:
+
+```bash
+# Run latest directly from GitHub:
+nix run github:<your-username>/driftwm-desktop
+
+# Or run locally from this repository:
+nix run .
+```
+
+---
+
+### 3. Non-Nix / Manual Python Setup
 
 Requirements:
 - Python 3.9+
 - PyQt5 & QtWayland
 - `dbus-python`
-- `glib` / `gio` (optional, for trash and properties)
+- `glib` / `gio` (for trash and properties integration)
+- `xdg-utils`
 - `driftwm` in `$PATH`
 
 ```bash
+git clone https://github.com/<your-username>/driftwm-desktop.git
+cd driftwm-desktop
 python3 ./driftwm-desktop
 ```
 
@@ -171,4 +219,4 @@ Pull Requests adding or refining translations for any language are warmly welcom
 
 ## License
 
-MIT
+This project is licensed under the GNU General Public License v3.0 ([GPL-3.0](LICENSE)).
