@@ -65,8 +65,6 @@ class DesktopItemWidget(QWidget):
         self._last_drag_move_time = 0.0
         self._is_hovered = False
         self._zoom = 1.0
-        self._pending_dx = 0.0
-        self._pending_dy = 0.0
 
         self.init_ui()
 
@@ -209,14 +207,12 @@ class DesktopItemWidget(QWidget):
         if event.button() == Qt.LeftButton:
             self._press_pos = event.pos()
             self._last_drag_pos = event.pos()
-            self._pending_dx = 0.0
-            self._pending_dy = 0.0
             self._is_dragging = False
             self._drag_dist = 0
-
-            # Freshly read coordinates and zoom from DriftWM
-            self._refresh_driftwm_info()
             self._zoom = get_zoom()
+
+            if not self.canvas_pos:
+                self._refresh_driftwm_info()
 
             if self.canvas_pos:
                 self._current_canvas_pos = list(self.canvas_pos)
@@ -226,8 +222,7 @@ class DesktopItemWidget(QWidget):
 
     def mouseMoveEvent(self, event):
         """
-        Tracks physical mouse motion during drag with strict frame-to-frame deltas
-        and surface displacement compensation.
+        Tracks physical mouse motion during drag with pure frame-to-frame deltas.
         Smoothly repositions the window via DriftWM IPC at 1:1 mouse speed.
         If Ctrl or Shift is held, launches a native QDrag for dropping into other programs.
         """
@@ -237,11 +232,9 @@ class DesktopItemWidget(QWidget):
                 self.start_file_drag()
                 return
 
-            # Compute real mouse delta accounting for window displacement from previous frame
-            step_dx = (event.pos().x() - self._last_drag_pos.x()) + self._pending_dx
-            step_dy = (event.pos().y() - self._last_drag_pos.y()) + self._pending_dy
-            self._pending_dx = 0.0
-            self._pending_dy = 0.0
+            # Pure incremental delta from the last event position (no positive feedback / no acceleration)
+            step_dx = event.pos().x() - self._last_drag_pos.x()
+            step_dy = event.pos().y() - self._last_drag_pos.y()
             self._last_drag_pos = event.pos()
 
             if not self._is_dragging:
@@ -252,23 +245,18 @@ class DesktopItemWidget(QWidget):
 
             if self._is_dragging:
                 if self._current_canvas_pos is None:
-                    self._refresh_driftwm_info()
                     if self.canvas_pos:
                         self._current_canvas_pos = list(self.canvas_pos)
                     else:
                         self._current_canvas_pos = [0, 0]
 
                 # Convert screen delta to canvas delta using active zoom factor
-                canvas_dx = int(round(step_dx / self._zoom))
-                canvas_dy = int(round(-step_dy / self._zoom))  # DriftWM canvas Y is UP
+                canvas_dx = int(round(step_dx / self._zoom)) if self._zoom else step_dx
+                canvas_dy = int(round(-step_dy / self._zoom)) if self._zoom else -step_dy  # DriftWM canvas Y is UP
 
                 if canvas_dx != 0 or canvas_dy != 0:
                     self._current_canvas_pos[0] += canvas_dx
                     self._current_canvas_pos[1] += canvas_dy
-
-                    # Compensate next event by the surface displacement we applied
-                    self._pending_dx += canvas_dx * self._zoom
-                    self._pending_dy += -canvas_dy * self._zoom
 
                     now = time.time()
                     if now - self._last_drag_move_time >= 0.015:
@@ -297,15 +285,11 @@ class DesktopItemWidget(QWidget):
                         self.on_moved(self.filepath.name, self.canvas_pos)
                 self._press_pos = None
                 self._last_drag_pos = None
-                self._pending_dx = 0.0
-                self._pending_dy = 0.0
                 event.accept()
                 return
             else:
                 self._press_pos = None
                 self._last_drag_pos = None
-                self._pending_dx = 0.0
-                self._pending_dy = 0.0
 
         super().mouseReleaseEvent(event)
 

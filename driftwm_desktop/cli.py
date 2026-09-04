@@ -54,6 +54,10 @@ def main():
     desktop_dir = args.desktop_dir or get_xdg_desktop_dir()
 
     if args.reset_positions:
+        app = QApplication.instance()
+        if not app:
+            app = QApplication(sys.argv)
+            app.setApplicationName(QT_DESKTOP_FILE_NAME)
         manager = DesktopManager(desktop_dir=desktop_dir, enable_daemon=False)
         manager.reset_positions()
         print(tr("positions_reset"))

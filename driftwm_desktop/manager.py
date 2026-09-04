@@ -12,7 +12,7 @@ from .config import (
 from .widget import DesktopItemWidget
 from .driftwm import (
     is_driftwm_available, get_desktop_windows_map,
-    move_window, get_state
+    move_window, move_window_async, get_state
 )
 from .state import load_positions, save_positions
 from .daemon import DriftwmDesktopDaemon
@@ -35,11 +35,15 @@ class DesktopManager:
         self.widgets: Dict[str, DesktopItemWidget] = {}
         self.daemon: Optional[DriftwmDesktopDaemon] = None
 
-        # Filesystem watcher to dynamically reflect additions, deletions, and modifications
+        # Filesystem watcher to dynamically reflect additions, deletions, modifications, and external state resets
         self.watcher = QFileSystemWatcher()
         if self.desktop_dir.exists():
             self.watcher.addPath(str(self.desktop_dir.resolve()))
             self.watcher.directoryChanged.connect(self.on_directory_changed)
+            self.watcher.fileChanged.connect(self._on_file_changed)
+        state_file = get_state_file_path()
+        if state_file.exists():
+            self.watcher.addPath(str(state_file.resolve()))
 
     def scan_items(self) -> List[Path]:
         """Scans the desktop directory for non-hidden files and folders."""
@@ -79,7 +83,8 @@ class DesktopManager:
         if self.enable_daemon and is_driftwm_available():
             self.daemon = DriftwmDesktopDaemon(
                 target_app_id=APP_ID,
-                desktop_dir=self.desktop_dir
+                desktop_dir=self.desktop_dir,
+                on_position_changed=self.on_daemon_position_changed
             )
             # Daemon starts disabled to prevent recording random WM placements
             self.daemon.disable()
@@ -279,9 +284,10 @@ class DesktopManager:
         grid_start_x = int(round(cam_x - 350))
         grid_start_y = int(round(cam_y + 250))
 
-        items = list(self.widgets.keys()) if self.widgets else list(title_to_win.keys())
+        # Always scan items from desktop_dir to ensure consistent alphabetical ordering
+        items = [p.name for p in self.scan_items()]
         if not items:
-            items = [p.name for p in self.scan_items()]
+            items = list(self.widgets.keys()) if self.widgets else list(title_to_win.keys())
 
         new_positions = {}
         for idx, filename in enumerate(items):
@@ -306,6 +312,33 @@ class DesktopManager:
                 self.daemon.positions = new_positions.copy()
 
         return True
+
+    def on_daemon_position_changed(self, filename: str, coords: List[int]):
+        """Updates cached widget canvas position when windows are moved externally."""
+        widget = self.widgets.get(filename)
+        if widget and not widget._is_dragging:
+            widget.canvas_pos = list(coords)
+
+    def _on_file_changed(self, path: str):
+        """Handles changes to files or external updates to the saved positions state file."""
+        state_file = get_state_file_path()
+        if path == str(state_file.resolve()) or Path(path).name == state_file.name:
+            saved = load_positions()
+            for filename, pos in saved.items():
+                widget = self.widgets.get(filename)
+                if widget and not widget._is_dragging:
+                    widget.canvas_pos = list(pos)
+                    if widget.driftwm_id is not None:
+                        move_window_async(widget.driftwm_id, pos[0], pos[1])
+            # Re-watch in case the file was replaced atomically
+            if state_file.exists() and str(state_file.resolve()) not in self.watcher.files():
+                self.watcher.addPath(str(state_file.resolve()))
+            return
+
+        filename = Path(path).name
+        widget = self.widgets.get(filename)
+        if widget:
+            widget.refresh()
 
     def on_item_moved(self, filename: str, coords: List[int]):
         """Handles widget drag-and-drop move event."""

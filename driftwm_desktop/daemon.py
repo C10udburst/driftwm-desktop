@@ -24,11 +24,13 @@ class DriftwmDesktopDaemon:
         self,
         target_app_id: str = APP_ID,
         desktop_dir: Optional[Path] = None,
-        debounce_interval: float = DEBOUNCE_SAVE_INTERVAL
+        debounce_interval: float = DEBOUNCE_SAVE_INTERVAL,
+        on_position_changed: Optional[Callable[[str, List[int]], None]] = None
     ):
         self.target_app_id = target_app_id
         self.desktop_dir = Path(desktop_dir) if desktop_dir else get_xdg_desktop_dir()
         self.debounce_interval = debounce_interval
+        self.on_position_changed = on_position_changed
         self.positions: Dict[str, List[int]] = load_positions()
         self.lock = threading.RLock()
         self.save_timer: Optional[threading.Timer] = None
@@ -146,6 +148,11 @@ class DriftwmDesktopDaemon:
                         if self.positions.get(filename) != int_pos:
                             self.positions[filename] = int_pos
                             changed = True
+                            if self.on_position_changed:
+                                try:
+                                    self.on_position_changed(filename, int_pos)
+                                except Exception:
+                                    pass
 
             if changed:
                 self._schedule_save()
