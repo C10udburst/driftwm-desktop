@@ -24,6 +24,16 @@ def get_state() -> Optional[dict]:
         return res["Ok"]["State"]
     return None
 
+def get_zoom() -> float:
+    """Returns current driftwm canvas zoom level (defaults to 1.0)."""
+    state = get_state()
+    if state and "zoom" in state:
+        try:
+            return float(state["zoom"])
+        except Exception:
+            pass
+    return 1.0
+
 def get_windows() -> List[dict]:
     """Returns the list of current windows reported by driftwm."""
     state = get_state()

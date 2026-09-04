@@ -11,12 +11,12 @@ from PyQt5.QtGui import QIcon, QFontMetrics, QColor, QPalette, QCursor, QPainter
 from PyQt5.QtCore import Qt, QSize, QPoint, QMimeData, QUrl
 
 from .config import ICON_SIZE, APP_ID
-from .parser import parse_item_info, DesktopItemInfo
+from .parser import parse_item_info, DesktopItemInfo, DesktopAction
 from .actions import (
     launch_item, open_with, show_properties,
     move_to_trash, delete_permanently, copy_to_clipboard
 )
-from .driftwm import move_window, move_window_async, get_desktop_windows_map
+from .driftwm import move_window, move_window_async, get_desktop_windows_map, get_zoom
 from .i18n import tr
 
 class DesktopItemWidget(QWidget):
@@ -25,10 +25,12 @@ class DesktopItemWidget(QWidget):
     - Transparent background
     - Automatic text-width sizing without ellipses
     - OS theme palette awareness
-    - Solid OS-themed context menu
+    - Solid OS-themed context menu with Desktop Actions (e.g. Immich/SiYuan actions)
     - Launch debounce
     - Interactive 1:1 real-time Drag & Drop positioning in DriftWM canvas via IPC
-    - External QDrag file dropping support (into Dolphin, VS Code, browser, terminal, etc.)
+    - Wayland motion compensation eliminating random drag jumping
+    - Canvas zoom awareness
+    - Native QDrag file dropping support into external programs (via Ctrl/Shift + Drag)
     - 'Open With...' choose application dialog
     - Dolphin-like file operations
     - Dynamic refresh on file change
@@ -54,7 +56,7 @@ class DesktopItemWidget(QWidget):
 
         self._last_launch_time = 0.0
 
-        # Drag tracking
+        # Drag & motion tracking
         self._press_pos: Optional[QPoint] = None
         self._last_drag_pos: Optional[QPoint] = None
         self._is_dragging = False
@@ -62,6 +64,9 @@ class DesktopItemWidget(QWidget):
         self._current_canvas_pos: Optional[List[int]] = None
         self._last_drag_move_time = 0.0
         self._is_hovered = False
+        self._zoom = 1.0
+        self._pending_dx = 0.0
+        self._pending_dy = 0.0
 
         self.init_ui()
 
@@ -163,10 +168,11 @@ class DesktopItemWidget(QWidget):
 
         self.setFixedSize(window_width, window_height)
 
-    def _ensure_driftwm_info(self):
-        """Ensures the window has its driftwm ID and canvas position cached."""
-        if self.driftwm_id is not None and self.canvas_pos is not None:
-            return
+    def _refresh_driftwm_info(self):
+        """
+        Always queries current live window ID and position from DriftWM,
+        preventing stale position jumps after viewport/camera pans.
+        """
         mapping = get_desktop_windows_map(APP_ID)
         win_info = mapping.get(self.filepath.name)
         if win_info:
@@ -199,13 +205,19 @@ class DesktopItemWidget(QWidget):
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
-        """Initiates drag tracking on left click."""
+        """Initiates drag tracking on left click with live coordinates and zoom."""
         if event.button() == Qt.LeftButton:
             self._press_pos = event.pos()
             self._last_drag_pos = event.pos()
+            self._pending_dx = 0.0
+            self._pending_dy = 0.0
             self._is_dragging = False
             self._drag_dist = 0
-            self._ensure_driftwm_info()
+
+            # Freshly read coordinates and zoom from DriftWM
+            self._refresh_driftwm_info()
+            self._zoom = get_zoom()
+
             if self.canvas_pos:
                 self._current_canvas_pos = list(self.canvas_pos)
             else:
@@ -215,7 +227,8 @@ class DesktopItemWidget(QWidget):
     def mouseMoveEvent(self, event):
         """
         Tracks physical mouse motion during drag with strict frame-to-frame deltas
-        and smoothly repositions the window via DriftWM IPC at 1:1 mouse speed.
+        and surface displacement compensation.
+        Smoothly repositions the window via DriftWM IPC at 1:1 mouse speed.
         If Ctrl or Shift is held, launches a native QDrag for dropping into other programs.
         """
         if (event.buttons() & Qt.LeftButton) and self._last_drag_pos is not None:
@@ -224,9 +237,11 @@ class DesktopItemWidget(QWidget):
                 self.start_file_drag()
                 return
 
-            # Compute incremental delta from the PREVIOUS event position (prevents runaway acceleration)
-            step_dx = event.pos().x() - self._last_drag_pos.x()
-            step_dy = event.pos().y() - self._last_drag_pos.y()
+            # Compute real mouse delta accounting for window displacement from previous frame
+            step_dx = (event.pos().x() - self._last_drag_pos.x()) + self._pending_dx
+            step_dy = (event.pos().y() - self._last_drag_pos.y()) + self._pending_dy
+            self._pending_dx = 0.0
+            self._pending_dy = 0.0
             self._last_drag_pos = event.pos()
 
             if not self._is_dragging:
@@ -237,16 +252,23 @@ class DesktopItemWidget(QWidget):
 
             if self._is_dragging:
                 if self._current_canvas_pos is None:
-                    self._ensure_driftwm_info()
+                    self._refresh_driftwm_info()
                     if self.canvas_pos:
                         self._current_canvas_pos = list(self.canvas_pos)
                     else:
                         self._current_canvas_pos = [0, 0]
 
-                if step_dx != 0 or step_dy != 0:
-                    # In DriftWM canvas: X is right (+step_dx), Y is UP (-step_dy)
-                    self._current_canvas_pos[0] += step_dx
-                    self._current_canvas_pos[1] -= step_dy
+                # Convert screen delta to canvas delta using active zoom factor
+                canvas_dx = int(round(step_dx / self._zoom))
+                canvas_dy = int(round(-step_dy / self._zoom))  # DriftWM canvas Y is UP
+
+                if canvas_dx != 0 or canvas_dy != 0:
+                    self._current_canvas_pos[0] += canvas_dx
+                    self._current_canvas_pos[1] += canvas_dy
+
+                    # Compensate next event by the surface displacement we applied
+                    self._pending_dx += canvas_dx * self._zoom
+                    self._pending_dy += -canvas_dy * self._zoom
 
                     now = time.time()
                     if now - self._last_drag_move_time >= 0.015:
@@ -275,11 +297,15 @@ class DesktopItemWidget(QWidget):
                         self.on_moved(self.filepath.name, self.canvas_pos)
                 self._press_pos = None
                 self._last_drag_pos = None
+                self._pending_dx = 0.0
+                self._pending_dy = 0.0
                 event.accept()
                 return
             else:
                 self._press_pos = None
                 self._last_drag_pos = None
+                self._pending_dx = 0.0
+                self._pending_dy = 0.0
 
         super().mouseReleaseEvent(event)
 
@@ -378,7 +404,7 @@ class DesktopItemWidget(QWidget):
     def show_context_menu(self, global_pos):
         """
         Displays an opaque, OS-themed context menu with Dolphin-like options,
-        including 'Open With...' (app chooser dialog) and external drag support.
+        all native Desktop Actions (e.g. Immich/SiYuan shortcuts), and 'Open With...'.
         """
         menu = QMenu(self)
         menu.setAttribute(Qt.WA_TranslucentBackground, False)
@@ -407,7 +433,7 @@ class DesktopItemWidget(QWidget):
             }
         """)
 
-        # Launch / Open action
+        # Main Launch / Open action
         open_label = tr("launch") if self.item_info.is_desktop else tr("open")
         open_icon = QIcon.fromTheme("system-run" if self.item_info.is_desktop else "document-open")
         act_open = menu.addAction(open_icon, open_label, self.launch)
@@ -415,17 +441,20 @@ class DesktopItemWidget(QWidget):
         font.setBold(True)
         act_open.setFont(font)
 
-        # Open With... (Choose application dialog)
-        open_with_icon = QIcon.fromTheme("document-open")
-        menu.addAction(open_with_icon, tr("open_with"), lambda: open_with(self.filepath, parent=self))
+        # Native Desktop Actions declared in the .desktop file
+        if self.item_info.actions:
+            for act in self.item_info.actions:
+                act_icon = QIcon.fromTheme(act.icon_name) if act.icon_name else QIcon()
+                if act_icon.isNull():
+                    act_icon = open_icon
+                cmd_to_run = list(act.cmd)
+                menu.addAction(act_icon, act.name, lambda c=cmd_to_run: launch_item(self.filepath, c))
 
         menu.addSeparator()
 
-        # Drag to external application
-        drag_icon = QIcon.fromTheme("view-restore")
-        if drag_icon.isNull():
-            drag_icon = open_icon
-        menu.addAction(drag_icon, tr("drag_to_app"), self.start_file_drag)
+        # Open With... (Choose application dialog)
+        open_with_icon = QIcon.fromTheme("document-open")
+        menu.addAction(open_with_icon, tr("open_with"), lambda: open_with(self.filepath, parent=self))
 
         menu.addSeparator()
 

@@ -15,6 +15,13 @@ except Exception:
     HAS_GIO = False
 
 @dataclass
+class DesktopAction:
+    action_id: str
+    name: str
+    cmd: List[str]
+    icon_name: str = ""
+
+@dataclass
 class DesktopItemInfo:
     filepath: Path
     display_name: str
@@ -22,6 +29,7 @@ class DesktopItemInfo:
     mime_type: str = ""
     icon_candidates: List[str] = field(default_factory=list)
     cmd: List[str] = field(default_factory=list)
+    actions: List[DesktopAction] = field(default_factory=list)
     is_desktop: bool = False
     is_dir: bool = False
 
@@ -119,25 +127,53 @@ def parse_item_info(filepath: Path) -> DesktopItemInfo:
     display_name = filepath.name
     icon_name = ""
     cmd = []
+    actions: List[DesktopAction] = []
 
     mime_type, best_icon, candidates = resolve_icon_candidates(filepath)
 
     if is_desktop:
         exec_cmd = ""
         try:
-            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-                current_section = ""
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("[") and line.endswith("]"):
-                        current_section = line[1:-1]
-                    if current_section == "Desktop Entry" or current_section == "":
-                        if line.startswith("Name=") and not display_name.endswith("(parsed)"):
-                            display_name = line.split("=", 1)[1].strip()
-                        elif line.startswith("Icon="):
-                            icon_name = line.split("=", 1)[1].strip()
-                        elif line.startswith("Exec="):
-                            exec_cmd = line.split("=", 1)[1].strip()
+            import configparser
+            from .i18n import get_current_language
+            curr_lang = get_current_language()
+
+            cp = configparser.ConfigParser(interpolation=None, strict=False)
+            cp.read(filepath, encoding="utf-8")
+
+            if "Desktop Entry" in cp:
+                entry = cp["Desktop Entry"]
+                name_val = entry.get(f"Name[{curr_lang}]") or entry.get("Name")
+                if name_val:
+                    display_name = name_val.strip()
+                if entry.get("Icon"):
+                    icon_name = entry.get("Icon").strip()
+                exec_cmd = entry.get("Exec", "")
+
+                actions_str = entry.get("Actions", "")
+                action_ids = [a.strip() for a in actions_str.split(";") if a.strip()]
+                for aid in action_ids:
+                    sec_name = f"Desktop Action {aid}"
+                    if sec_name in cp:
+                        sec = cp[sec_name]
+                        act_name = sec.get(f"Name[{curr_lang}]") or sec.get("Name", aid).strip()
+                        act_exec = sec.get("Exec", "")
+                        act_icon = sec.get("Icon", "").strip()
+                        act_cmd = []
+                        if act_exec:
+                            try:
+                                for word in shlex.split(act_exec):
+                                    if not word.startswith("%"):
+                                        act_cmd.append(word)
+                            except Exception:
+                                act_cmd = [w for w in act_exec.split() if not w.startswith("%")]
+                        if act_cmd:
+                            actions.append(DesktopAction(
+                                action_id=aid,
+                                name=act_name,
+                                cmd=act_cmd,
+                                icon_name=act_icon
+                            ))
         except Exception:
             pass
 
@@ -148,7 +184,7 @@ def parse_item_info(filepath: Path) -> DesktopItemInfo:
                     if not word.startswith("%"):
                         cmd.append(word)
             except Exception:
-                cmd = exec_cmd.split()
+                cmd = [w for w in exec_cmd.split() if not w.startswith("%")]
 
         if not icon_name:
             icon_name = "application-x-executable"
@@ -165,6 +201,7 @@ def parse_item_info(filepath: Path) -> DesktopItemInfo:
         mime_type=mime_type,
         icon_candidates=candidates,
         cmd=cmd,
+        actions=actions,
         is_desktop=is_desktop,
         is_dir=is_dir
     )
