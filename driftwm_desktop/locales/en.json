@@ -25,5 +25,6 @@
   "no_files_found": "No files found in desktop folder: {path}",
   "daemon_started": "Driftwm desktop daemon started. Saving to {path}...",
   "daemon_stopping": "\nShutting down daemon...",
-  "positions_reset": "Desktop item positions have been reset."
+  "positions_reset": "Desktop item positions have been reset.",
+  "drag_to_app": "Drag to external application..."
 }

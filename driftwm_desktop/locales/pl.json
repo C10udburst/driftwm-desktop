@@ -25,5 +25,6 @@
   "no_files_found": "Brak plików w folderze pulpitu: {path}",
   "daemon_started": "Demon pulpitu Driftwm uruchomiony. Zapisywanie do {path}...",
   "daemon_stopping": "\nZatrzymywanie demona...",
-  "positions_reset": "Pozycje elementów pulpitu zostały zresetowane."
+  "positions_reset": "Pozycje elementów pulpitu zostały zresetowane.",
+  "drag_to_app": "Przeciągnij do innego programu..."
 }

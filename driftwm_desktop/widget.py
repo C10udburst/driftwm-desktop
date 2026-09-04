@@ -7,8 +7,8 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QMenu, QAction,
     QInputDialog, QMessageBox, QGraphicsDropShadowEffect, QApplication
 )
-from PyQt5.QtGui import QIcon, QFontMetrics, QColor, QPalette, QCursor, QPainter
-from PyQt5.QtCore import Qt, QSize, QPoint
+from PyQt5.QtGui import QIcon, QFontMetrics, QColor, QPalette, QCursor, QPainter, QDrag
+from PyQt5.QtCore import Qt, QSize, QPoint, QMimeData, QUrl
 
 from .config import ICON_SIZE, APP_ID
 from .parser import parse_item_info, DesktopItemInfo
@@ -27,7 +27,8 @@ class DesktopItemWidget(QWidget):
     - OS theme palette awareness
     - Solid OS-themed context menu
     - Launch debounce
-    - Interactive real-time Drag & Drop positioning in DriftWM canvas via IPC
+    - Interactive 1:1 real-time Drag & Drop positioning in DriftWM canvas via IPC
+    - External QDrag file dropping support (into Dolphin, VS Code, browser, terminal, etc.)
     - 'Open With...' choose application dialog
     - Dolphin-like file operations
     - Dynamic refresh on file change
@@ -55,6 +56,7 @@ class DesktopItemWidget(QWidget):
 
         # Drag tracking
         self._press_pos: Optional[QPoint] = None
+        self._last_drag_pos: Optional[QPoint] = None
         self._is_dragging = False
         self._drag_dist = 0
         self._current_canvas_pos: Optional[List[int]] = None
@@ -200,6 +202,7 @@ class DesktopItemWidget(QWidget):
         """Initiates drag tracking on left click."""
         if event.button() == Qt.LeftButton:
             self._press_pos = event.pos()
+            self._last_drag_pos = event.pos()
             self._is_dragging = False
             self._drag_dist = 0
             self._ensure_driftwm_info()
@@ -211,15 +214,23 @@ class DesktopItemWidget(QWidget):
 
     def mouseMoveEvent(self, event):
         """
-        Tracks physical mouse motion during drag and continuously repositions
-        the window via DriftWM IPC.
+        Tracks physical mouse motion during drag with strict frame-to-frame deltas
+        and smoothly repositions the window via DriftWM IPC at 1:1 mouse speed.
+        If Ctrl or Shift is held, launches a native QDrag for dropping into other programs.
         """
-        if (event.buttons() & Qt.LeftButton) and self._press_pos is not None:
-            dx = event.pos().x() - self._press_pos.x()
-            dy = event.pos().y() - self._press_pos.y()
+        if (event.buttons() & Qt.LeftButton) and self._last_drag_pos is not None:
+            # If Ctrl or Shift is pressed while dragging, activate native QDrag to drop into other programs
+            if event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier):
+                self.start_file_drag()
+                return
+
+            # Compute incremental delta from the PREVIOUS event position (prevents runaway acceleration)
+            step_dx = event.pos().x() - self._last_drag_pos.x()
+            step_dy = event.pos().y() - self._last_drag_pos.y()
+            self._last_drag_pos = event.pos()
 
             if not self._is_dragging:
-                self._drag_dist += abs(dx) + abs(dy)
+                self._drag_dist += abs(event.pos().x() - self._press_pos.x()) + abs(event.pos().y() - self._press_pos.y())
                 if self._drag_dist >= 6:
                     self._is_dragging = True
                     QApplication.setOverrideCursor(Qt.ClosedHandCursor)
@@ -232,10 +243,10 @@ class DesktopItemWidget(QWidget):
                     else:
                         self._current_canvas_pos = [0, 0]
 
-                if dx != 0 or dy != 0:
-                    # In DriftWM canvas: X is right (+dx), Y is UP (-dy)
-                    self._current_canvas_pos[0] += dx
-                    self._current_canvas_pos[1] -= dy
+                if step_dx != 0 or step_dy != 0:
+                    # In DriftWM canvas: X is right (+step_dx), Y is UP (-step_dy)
+                    self._current_canvas_pos[0] += step_dx
+                    self._current_canvas_pos[1] -= step_dy
 
                     now = time.time()
                     if now - self._last_drag_move_time >= 0.015:
@@ -263,10 +274,12 @@ class DesktopItemWidget(QWidget):
                     if self.on_moved:
                         self.on_moved(self.filepath.name, self.canvas_pos)
                 self._press_pos = None
+                self._last_drag_pos = None
                 event.accept()
                 return
             else:
                 self._press_pos = None
+                self._last_drag_pos = None
 
         super().mouseReleaseEvent(event)
 
@@ -280,6 +293,28 @@ class DesktopItemWidget(QWidget):
         """Right-clicking displays the context menu."""
         self.show_context_menu(event.globalPos())
         event.accept()
+
+    def start_file_drag(self):
+        """
+        Initiates a standard FreeDesktop/Qt QDrag object with text/uri-list.
+        Allows dragging this file and dropping it into external applications
+        (Dolphin, VS Code, web browsers, terminal, Discord, etc.).
+        """
+        if QApplication.overrideCursor():
+            QApplication.restoreOverrideCursor()
+        self._is_dragging = False
+
+        drag = QDrag(self)
+        mime_data = QMimeData()
+        mime_data.setUrls([QUrl.fromLocalFile(str(self.filepath.resolve()))])
+        drag.setMimeData(mime_data)
+
+        pixmap = self.grab()
+        drag.setPixmap(pixmap)
+        hotspot = self._press_pos if self._press_pos else QPoint(pixmap.width() // 2, pixmap.height() // 2)
+        drag.setHotSpot(hotspot)
+
+        drag.exec_(Qt.CopyAction | Qt.MoveAction)
 
     def launch(self):
         """Executes or opens the desktop item with a debounce to prevent double opens."""
@@ -343,7 +378,7 @@ class DesktopItemWidget(QWidget):
     def show_context_menu(self, global_pos):
         """
         Displays an opaque, OS-themed context menu with Dolphin-like options,
-        including 'Open With...' (app chooser dialog).
+        including 'Open With...' (app chooser dialog) and external drag support.
         """
         menu = QMenu(self)
         menu.setAttribute(Qt.WA_TranslucentBackground, False)
@@ -383,6 +418,14 @@ class DesktopItemWidget(QWidget):
         # Open With... (Choose application dialog)
         open_with_icon = QIcon.fromTheme("document-open")
         menu.addAction(open_with_icon, tr("open_with"), lambda: open_with(self.filepath, parent=self))
+
+        menu.addSeparator()
+
+        # Drag to external application
+        drag_icon = QIcon.fromTheme("view-restore")
+        if drag_icon.isNull():
+            drag_icon = open_icon
+        menu.addAction(drag_icon, tr("drag_to_app"), self.start_file_drag)
 
         menu.addSeparator()
 
