@@ -3,7 +3,7 @@ import threading
 import signal
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 from .config import APP_ID, DEBOUNCE_SAVE_INTERVAL, get_state_file_path, get_xdg_desktop_dir
 from .driftwm import subscribe_stream, is_our_window
 from .state import load_positions, save_positions
