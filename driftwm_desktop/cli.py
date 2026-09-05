@@ -1,8 +1,10 @@
 import sys
 import argparse
+import signal
 from pathlib import Path
 
 from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import QTimer
 
 from .config import QT_DESKTOP_FILE_NAME, get_xdg_desktop_dir
 from .manager import DesktopManager
@@ -71,6 +73,8 @@ def main():
     app = QApplication(sys.argv)
     app.setDesktopFileName(QT_DESKTOP_FILE_NAME)
     app.setApplicationName("driftwm.desktop")
+    # Keep application running even when no widgets are open
+    app.setQuitOnLastWindowClosed(False)
 
     if not desktop_dir.exists():
         print(tr("desktop_not_found", path=desktop_dir))
@@ -92,9 +96,13 @@ def main():
     # 4. Enables daemon for real-time tracking and drag & drop
     manager.start_lifecycle()
 
-    if not manager.widgets:
-        print(tr("no_files_found", path=desktop_dir))
-        sys.exit(0)
+    # Periodic timer so Python interpreter can process POSIX signals (Ctrl+C / SIGINT)
+    sig_timer = QTimer()
+    sig_timer.start(500)
+    sig_timer.timeout.connect(lambda: None)
+
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    signal.signal(signal.SIGTERM, lambda *_: app.quit())
 
     app.aboutToQuit.connect(manager.shutdown)
     sys.exit(app.exec_())

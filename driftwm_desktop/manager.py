@@ -73,12 +73,10 @@ class DesktopManager:
         """
         Starts the desktop management lifecycle:
         1. Spawns widgets
-        2. Starts the daemon in disabled/paused state (protecting saved positions from random boot positions)
+        2. Starts the daemon (protecting saved positions from random boot placements when restoring)
         3. Schedules delayed position restore once the window manager finishes surface mapping
         """
         self.spawn_windows()
-        if not self.widgets:
-            return
 
         if self.enable_daemon and is_driftwm_available():
             self.daemon = DriftwmDesktopDaemon(
@@ -86,12 +84,17 @@ class DesktopManager:
                 desktop_dir=self.desktop_dir,
                 on_position_changed=self.on_daemon_position_changed
             )
-            # Daemon starts disabled to prevent recording random WM placements
-            self.daemon.disable()
+            if not self.widgets:
+                # No widgets to restore, enable daemon immediately
+                self.daemon.enable()
+            else:
+                # Daemon starts disabled to prevent recording random WM placements
+                self.daemon.disable()
             self.daemon.start_background()
 
-        # Schedule restore inside the event loop after the compositor maps the windows
-        QTimer.singleShot(250, self.restore_positions)
+        if self.widgets:
+            # Schedule restore inside the event loop after the compositor maps the windows
+            QTimer.singleShot(250, self.restore_positions)
 
     def restore_positions(self, max_wait_sec: float = 2.0):
         """
@@ -112,13 +115,22 @@ class DesktopManager:
         # Wait until driftwm registers our spawned surfaces
         deadline = time.time() + max_wait_sec
         title_to_win = {}
-        while time.time() < deadline:
+        target_count = len(self.widgets)
+        if target_count > 0:
+            while time.time() < deadline:
+                title_to_win = get_desktop_windows_map(APP_ID)
+                if len(title_to_win) >= target_count:
+                    break
+                if app:
+                    app.processEvents()
+                time.sleep(0.05)
+        else:
             title_to_win = get_desktop_windows_map(APP_ID)
-            if len(title_to_win) >= len(self.widgets):
-                break
-            if app:
-                app.processEvents()
-            time.sleep(0.05)
+
+        items_to_restore = list(self.widgets.keys()) if self.widgets else list(title_to_win.keys())
+        if not items_to_restore:
+            self._finalize_restore()
+            return
 
         saved_positions = load_positions()
         updated_saved = False
@@ -131,18 +143,21 @@ class DesktopManager:
         grid_start_y = int(round(cam_y + 250))
 
         idx = 0
-        for filename, widget in self.widgets.items():
+        for filename in items_to_restore:
             win_info = title_to_win.get(filename)
             if not win_info:
                 continue
 
             win_id = win_info["id"]
-            widget.driftwm_id = win_id
+            widget = self.widgets.get(filename)
+            if widget:
+                widget.driftwm_id = win_id
 
             if filename in saved_positions:
                 target_x, target_y = saved_positions[filename]
                 move_window(win_id, target_x, target_y)
-                widget.canvas_pos = [target_x, target_y]
+                if widget:
+                    widget.canvas_pos = [target_x, target_y]
             else:
                 # Default grid layout for new files
                 col = idx % 8
@@ -151,7 +166,8 @@ class DesktopManager:
                 target_y = grid_start_y - (row * GRID_SPACING_Y)
                 move_window(win_id, target_x, target_y)
                 saved_positions[filename] = [target_x, target_y]
-                widget.canvas_pos = [target_x, target_y]
+                if widget:
+                    widget.canvas_pos = [target_x, target_y]
                 updated_saved = True
 
             idx += 1
